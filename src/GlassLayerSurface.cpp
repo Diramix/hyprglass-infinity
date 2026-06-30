@@ -11,6 +11,7 @@
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprutils/math/Misc.hpp>
+#include <hyprutils/math/Region.hpp>
 
 static CBox transformedLayerBox(CBox pixelBox, PHLMONITOR monitor) {
     const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
@@ -143,9 +144,28 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
                              layerSurface->m_realSize->isBeingAnimated() ||
                              layerSurface->m_alpha->isBeingAnimated() ||
                              (activeWs && activeWs->m_renderOffset->isBeingAnimated());
+
+    // The scene-generation counter only catches discrete window events
+    // (focus/move/workspace). It misses content that redraws in place behind
+    // the layer — a playing video, a scrolling terminal, etc. Hyprland only
+    // re-renders a monitor (and thus reaches this hook) when something is
+    // damaged, so the current frame's damage region tells us whether the
+    // background pixels under the glass were actually repainted this frame.
+    bool backgroundDamaged = false;
+    {
+        CBox sampleBox = transformBox;
+        sampleBox.expand(GlassRenderer::SAMPLE_PADDING_PX).noNegativeSize().round();
+        if (sampleBox.w > 0.0 && sampleBox.h > 0.0) {
+            CRegion damage = g_pHyprRenderer->m_renderData.damage.copy();
+            damage.intersect(sampleBox);
+            backgroundDamaged = !damage.empty();
+        }
+    }
+
     const bool backgroundChanged = !m_hasCachedSample ||
                                    currentGeneration != m_lastSceneGeneration ||
-                                   isAnimating;
+                                   isAnimating ||
+                                   backgroundDamaged;
 
     if (layerSurface->m_fadingOut) {
         // During fade-out, re-sampling captures stale pixels. Reuse cached sample.
