@@ -1,6 +1,6 @@
 [repository]
 name = "hyprglass-infinity"
-authors = ["Hyprnux", "diram1x"]
+authors = ["Hyprnux", "Diramix"]
 description = "Apple-style Liquid Glass effect for Hyprland"
 
 [hyprglass]
