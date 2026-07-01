@@ -167,10 +167,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
                                    isAnimating ||
                                    backgroundDamaged;
 
-    if (layerSurface->m_fadingOut) {
-        // During fade-out, re-sampling captures stale pixels. Reuse cached sample.
-        if (!m_hasCachedSample)
-            return;
+    if (layerSurface->m_fadingOut && m_hasCachedSample) {
     } else if (backgroundChanged) {
         const bool isDark          = resolveThemeIsDark();
         const std::string preset   = resolvePresetName();

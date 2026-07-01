@@ -22,13 +22,6 @@ static void clearLayerGlassOnClose(PHLLS layerSurface) {
     if (!g_pGlobalState || !layerSurface)
         return;
 
-    // Drop cached layer glass immediately. Otherwise the previous glass output
-    // can remain in the damage history while Hyprland switches to its close
-    // snapshot path, showing stale/black pixels for a frame.
-    std::erase_if(g_pGlobalState->layerSurfaces, [&](const auto& pair) {
-        return pair.first == layerSurface.get() || pair.second->getLayerSurface() == layerSurface;
-    });
-
     if (auto monitor = layerSurface->m_monitor.lock())
         g_pHyprRenderer->damageMonitor(monitor);
 }
@@ -159,11 +152,6 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
             it->second = std::make_shared<CGlassLayerSurface>(layerSurface);
         } else if (it == layerStates.end()) {
             it = layerStates.emplace(rawPtr, std::make_shared<CGlassLayerSurface>(layerSurface)).first;
-        }
-
-        if (layerSurface->m_fadingOut) {
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
-            return;
         }
 
         float alpha = layerSurface->m_alpha->value();
