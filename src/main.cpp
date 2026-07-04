@@ -15,6 +15,7 @@
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 
 #include <sstream>
 
@@ -126,20 +127,53 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
                            const Time::steady_tp& now, bool popups, bool lockscreen) {
     const auto& config = g_pGlobalState->config;
 
-    // Hyprland renders closing layers from snapshots. Do not inject the glass
-    // pipeline while that snapshot is being captured: the snapshot framebuffer
-    // starts transparent/black, so sampling it as a background can bake a black
-    // rectangle into the fade-out snapshot.
+    // Hyprland renders closing layers from snapshots captured at unmap time.
+    // Bake the glass effect into that snapshot using the cached blurred
+    // background: the fade-out then simply fades a correct, final image.
+    // Re-applying glass per-frame during the fade instead leaks the mask
+    // (bilinear bleed of the scaled snapshot passes the alpha threshold) and
+    // flashes a dark rectangle around the element near the end.
+    // Never re-SAMPLE here though: the snapshot FB starts transparent/black.
     if (g_pHyprRenderer->m_bRenderingSnapshot) {
+        if (!popups && config.layersEnabled && **config.layersEnabled && shouldGlassLayer(layerSurface)) {
+            auto it = g_pGlobalState->layerSurfaces.find(layerSurface.get());
+            if (it != g_pGlobalState->layerSurfaces.end() &&
+                it->second->getLayerSurface() == layerSurface && it->second->hasCachedSample()) {
+                const float alpha = std::clamp(layerSurface->m_alpha->value(), 0.0f, 1.0f);
+
+                CGlassLayerPassElement::SGlassLayerPassData preData{it->second, alpha};
+                g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerPassElement>(preData));
+
+                ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+
+                CGlassLayerCompositeElement::SGlassLayerCompositeData postData{it->second, alpha};
+                g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerCompositeElement>(postData));
+                return;
+            }
+        }
         ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
         return;
     }
 
     // Prune dead layer surfaces whose weak_ptr has expired (layer was destroyed
-    // but never got a replacement at the same raw pointer address)
-    std::erase_if(g_pGlobalState->layerSurfaces, [](const auto& pair) {
-        return !pair.second->getLayerSurface();
-    });
+    // but never got a replacement at the same raw pointer address).
+    // Retire them instead of destroying in place: this code runs while the
+    // current frame is being built, and freeing GL framebuffers / posting
+    // damage here can produce a corrupted (black) frame.
+    for (auto it = g_pGlobalState->layerSurfaces.begin(); it != g_pGlobalState->layerSurfaces.end();) {
+        if (!it->second->getLayerSurface()) {
+            g_pGlobalState->retiredLayerStates.emplace_back(std::move(it->second));
+            it = g_pGlobalState->layerSurfaces.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (!g_pGlobalState->retiredLayerStates.empty()) {
+        g_pEventLoopManager->doLater([]() {
+            if (g_pGlobalState)
+                g_pGlobalState->retiredLayerStates.clear();
+        });
+    }
 
     // Only inject glass on the main surface pass, not popups
     if (!popups && config.layersEnabled && **config.layersEnabled && shouldGlassLayer(layerSurface)) {
@@ -149,9 +183,19 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         auto& layerStates = g_pGlobalState->layerSurfaces;
         auto it = layerStates.find(rawPtr);
         if (it != layerStates.end() && !it->second->getLayerSurface()) {
+            g_pGlobalState->retiredLayerStates.emplace_back(std::move(it->second));
             it->second = std::make_shared<CGlassLayerSurface>(layerSurface);
         } else if (it == layerStates.end()) {
             it = layerStates.emplace(rawPtr, std::make_shared<CGlassLayerSurface>(layerSurface)).first;
+        }
+
+        // Fading-out layers render from their snapshot, which already has the
+        // glass baked in (see the m_bRenderingSnapshot branch above). Injecting
+        // the live glass pipeline on top would double-apply the effect and
+        // reintroduce mask-leak artifacts.
+        if (layerSurface->m_fadingOut) {
+            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+            return;
         }
 
         float alpha = layerSurface->m_alpha->value();

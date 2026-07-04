@@ -40,6 +40,11 @@ struct SGlobalState {
     // Per-namespace mask alpha threshold (namespace → threshold, default 0.001)
     std::unordered_map<std::string, float> layerNamespaceMaskThresholds;
 
+    // Stale layer states retired during rendering. Destroying them (GL resource
+    // deletion, damage) mid-frame can corrupt the frame being built, so they
+    // are parked here and freed later from the event loop.
+    std::vector<std::shared_ptr<CGlassLayerSurface>> retiredLayerStates;
+
     // Per-monitor generation counter, incremented when the scene behind layers
     // changes on that monitor. Layer surfaces compare to their cached value to
     // skip redundant blur work. Per-monitor avoids cross-monitor feedback loops

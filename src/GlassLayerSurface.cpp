@@ -24,16 +24,10 @@ CGlassLayerSurface::CGlassLayerSurface(PHLLS layerSurface)
 }
 
 CGlassLayerSurface::~CGlassLayerSurface() {
-    // Damage the area where glass was last drawn so the compositor
-    // re-renders it without the glass effect (prevents ghost artifacts).
-    if (g_pHyprRenderer && m_lastSize.x > 0 && m_lastSize.y > 0 &&
-        std::isfinite(m_lastPosition.x) && std::isfinite(m_lastPosition.y) &&
-        std::isfinite(m_lastSize.x) && std::isfinite(m_lastSize.y)) {
-        auto box = CBox{m_lastPosition, m_lastSize};
-        box.expand(GlassRenderer::SAMPLE_PADDING_PX).noNegativeSize();
-        if (box.w > 0.0 && box.h > 0.0)
-            g_pHyprRenderer->damageBox(box);
-    }
+    // No damage here on purpose: the destructor can run while a frame is
+    // being built (state prune inside the renderLayer hook), and posting
+    // damage mid-render can corrupt the frame being assembled. The
+    // layer.closed handler already damages the monitor when a layer goes away.
 }
 
 bool CGlassLayerSurface::resolveThemeIsDark() const {
@@ -167,7 +161,9 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
                                    isAnimating ||
                                    backgroundDamaged;
 
-    if (layerSurface->m_fadingOut && m_hasCachedSample) {
+    // While capturing the close snapshot (or fading out) the current FB is not
+    // a valid background source — reuse the cached blurred sample instead.
+    if ((g_pHyprRenderer->m_bRenderingSnapshot || layerSurface->m_fadingOut) && m_hasCachedSample) {
     } else if (backgroundChanged) {
         const bool isDark          = resolveThemeIsDark();
         const std::string preset   = resolvePresetName();
