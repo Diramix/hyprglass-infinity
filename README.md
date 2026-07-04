@@ -4,6 +4,7 @@
 ### Changes in this fork
 
 * Fixed glass layer not refreshing when content behind it changes (e.g. playing video)
+* Fixed glass effect disappearing during layer close (out) animations
 
 ## Special thanks
 

@@ -21,6 +21,8 @@ class CGlassLayerSurface {
 
     [[nodiscard]] PHLLS getLayerSurface() const;
 
+    [[nodiscard]] bool hasCachedSample() const { return m_hasCachedSample; }
+
   private:
     PHLLSREF     m_layerSurface;
     SP<Render::IFramebuffer> m_sampleFramebuffer;
