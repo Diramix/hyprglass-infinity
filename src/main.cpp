@@ -17,6 +17,7 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 
+#include <cstdlib>
 #include <sstream>
 
 static void clearLayerGlassOnClose(PHLLS layerSurface) {
@@ -139,7 +140,7 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
             auto it = g_pGlobalState->layerSurfaces.find(layerSurface.get());
             if (it != g_pGlobalState->layerSurfaces.end() &&
                 it->second->getLayerSurface() == layerSurface && it->second->hasCachedSample()) {
-                const float alpha = std::clamp(layerSurface->m_alpha->value(), 0.0f, 1.0f);
+                const float alpha = std::clamp(layerSurface->alpha().getTotal(), 0.0f, 1.0f);
 
                 CGlassLayerPassElement::SGlassLayerPassData preData{it->second, alpha};
                 g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerPassElement>(preData));
@@ -193,12 +194,12 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         // glass baked in (see the m_bRenderingSnapshot branch above). Injecting
         // the live glass pipeline on top would double-apply the effect and
         // reintroduce mask-leak artifacts.
-        if (layerSurface->m_fadingOut) {
+        if (!layerSurface->m_mapped) {
             ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
             return;
         }
 
-        float alpha = layerSurface->m_alpha->value();
+        float alpha = layerSurface->alpha().getTotal();
         if (alpha < 0.001f) {
             ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
             return;
@@ -234,11 +235,31 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     const std::string HASH        = __hyprland_api_get_hash();
     const std::string CLIENT_HASH = __hyprland_api_get_client_hash();
 
-    if (HASH != CLIENT_HASH) {
-        HyprlandAPI::addNotification(PHANDLE,
-            std::format("[{}] Version mismatch!", PLUGIN_NAME),
-            CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
-        throw std::runtime_error("Version mismatch");
+    // Only compare the ABI suffix (e.g. "_aq_0.12_hu_0.13_hg_0.5_hc_0.1_hlg_0.6"),
+    // not the leading commit hash. The commit hash changes with every git commit
+    // but the ABI components determine actual binary compatibility.
+    auto abiSuffix = [](const std::string& hash) -> std::string_view {
+        auto pos = hash.find("_aq_");
+        return pos != std::string::npos ? std::string_view{hash}.substr(pos) : std::string_view{hash};
+    };
+
+    if (abiSuffix(HASH) != abiSuffix(CLIENT_HASH)) {
+        // Last-resort escape hatch for exotic setups: HYPRGLASS_SKIP_VERSION_CHECK
+        // (set in Hyprland's own environment) downgrades the hard failure to a
+        // warning. Unsupported — a real ABI mismatch can crash Hyprland.
+        const char* skipEnv  = std::getenv("HYPRGLASS_SKIP_VERSION_CHECK");
+        const bool  skip     = skipEnv && *skipEnv && std::string_view{skipEnv} != "0";
+        if (!skip) {
+            HyprlandAPI::addNotification(PHANDLE,
+                std::format("[{}] Version mismatch! (plugin: {}, running: {})", PLUGIN_NAME, HASH, CLIENT_HASH),
+                CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
+            throw std::runtime_error("Version mismatch");
+        }
+        HyprlandAPI::addNotificationV2(PHANDLE, {
+            {"text", std::format("[{}] Version mismatch ignored (HYPRGLASS_SKIP_VERSION_CHECK) — ABI differences may crash Hyprland", PLUGIN_NAME)},
+            {"time", (uint64_t)8000},
+            {"color", CHyprColor{1.0, 0.8, 0.2, 1.0}},
+        });
     }
 
     g_pGlobalState = std::make_unique<SGlobalState>();
@@ -252,7 +273,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Z-order / visibility changes invalidate layer glass caches on the affected monitor only.
     // Per-monitor to avoid triggering re-samples on idle monitors (feedback loop).
     auto bumpWindowMonitor = [&](PHLWINDOW w) {
-        if (w) if (auto mon = w->m_monitor.lock()) g_pGlobalState->bumpSceneGeneration(mon.get());
+        if (w) if (auto mon = w->m_monitor.lock()) g_pGlobalState->bumpSceneGeneration(mon);
     };
     static auto onWindowActive = Event::bus()->m_events.window.active.listen(
         [=](PHLWINDOW w, Desktop::eFocusReason) { bumpWindowMonitor(w); });
@@ -262,7 +283,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         [=](PHLWINDOW w, PHLWORKSPACE) { bumpWindowMonitor(w); });
     static auto onWorkspaceActive = Event::bus()->m_events.workspace.active.listen(
         [&](PHLWORKSPACE ws) {
-            if (ws) if (auto mon = ws->m_monitor.lock()) g_pGlobalState->bumpSceneGeneration(mon.get());
+            if (ws) if (auto mon = ws->m_monitor.lock()) g_pGlobalState->bumpSceneGeneration(mon);
         });
 
     // Clear pending presets/layers before config re-parse, commit after
@@ -291,7 +312,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         HyprlandAPI::invokeHyprctlCommand("keyword", "decoration:shadow:enabled true");
     }
 
-    for (auto& window : g_pCompositor->m_windows) {
+    for (auto& window : Desktop::viewState()->windows()) {
         if (window->isHidden() || !window->m_isMapped)
             continue;
         onNewWindow(window);
